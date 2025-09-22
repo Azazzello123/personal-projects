@@ -1,2 +1,2 @@
 # personal-projects
-This is a repository of all the coding/scripting I did so far
+This is a repository of some examples of coding/scripting I did so far
