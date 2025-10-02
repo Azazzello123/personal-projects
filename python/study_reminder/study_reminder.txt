@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""
+Study Reminder - Tkinter app
+
+Features:
+- Input total study hours and break hours (break < study)
+- Hourly reminders (configurable interval for testing)
+- Popups asking "Did you study?" and if not, "Was this a break?"
+- GUI progress tracking (remaining study/break hours, sessions elapsed, progress bar)
+- Start / Pause / Reset controls
+
+This file is intended as a complete, runnable single-file Python program. It's heavily commented so you can follow along.
+
+Run: python study_reminder.py
+
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sys
+
+# Milliseconds per real hour (used when NOT in test mode)
+MILLISECONDS_PER_HOUR = 60 * 60 * 1000
+
+class StudyReminderApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("Study Reminder")
+        root.resizable(False, False)
+
+        # --- State variables ---
+        # User-configured totals
+        self.study_total_var = tk.IntVar(value=2)
+        self.break_total_var = tk.IntVar(value=1)
+
+        # Remaining counts (will be set when session starts)
+        self.study_left_var = tk.IntVar(value=0)
+        self.break_left_var = tk.IntVar(value=0)
+
+        # Session / timer state
+        self.sessions_elapsed_var = tk.IntVar(value=0)
+        self.test_mode_var = tk.BooleanVar(value=True)  # default to test mode for easier debugging
+        self.test_interval_var = tk.IntVar(value=10)    # seconds when in test mode
+
+        self.running = False
+        self.timer_id = None  # holds the tkinter `after` id so we can cancel
+
+        self._build_ui()
+        self._update_gui()
+
+    # ---------------- UI ----------------
+    def _build_ui(self):
+        pad = 8
+        frm = ttk.Frame(self.root, padding=pad)
+        frm.grid(row=0, column=0, sticky="nsew")
+
+        # Inputs: study hours & break hours
+        inputs = ttk.Frame(frm)
+        inputs.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(inputs, text="Study hours:").grid(row=0, column=0, sticky="w")
+        self.study_entry = ttk.Entry(inputs, width=6, textvariable=self.study_total_var)
+        self.study_entry.grid(row=0, column=1, padx=(6, 12))
+
+        ttk.Label(inputs, text="Break hours:").grid(row=0, column=2, sticky="w")
+        self.break_entry = ttk.Entry(inputs, width=6, textvariable=self.break_total_var)
+        self.break_entry.grid(row=0, column=3, padx=(6, 12))
+
+        # Test mode controls
+        self.test_chk = ttk.Checkbutton(frm, text="Test mode (use seconds)", variable=self.test_mode_var, command=self._on_test_mode_toggle)
+        self.test_chk.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        test_frame = ttk.Frame(frm)
+        test_frame.grid(row=2, column=0, sticky="w")
+        ttk.Label(test_frame, text="Interval (seconds):").grid(row=0, column=0)
+        self.test_interval_entry = ttk.Entry(test_frame, width=6, textvariable=self.test_interval_var)
+        self.test_interval_entry.grid(row=0, column=1, padx=(6, 0))
+
+        # Controls: Start / Pause / Reset
+        controls = ttk.Frame(frm)
+        controls.grid(row=3, column=0, pady=(12, 0))
+        self.start_btn = ttk.Button(controls, text="Start", command=self.start_session)
+        self.start_btn.grid(row=0, column=0, padx=(0, 6))
+        self.pause_btn = ttk.Button(controls, text="Pause", command=self.stop_session, state="disabled")
+        self.pause_btn.grid(row=0, column=1, padx=(0, 6))
+        self.reset_btn = ttk.Button(controls, text="Reset", command=self.reset_session)
+        self.reset_btn.grid(row=0, column=2)
+
+        # Status area
+        status = ttk.Frame(frm)
+        status.grid(row=4, column=0, sticky="w", pady=(12, 0))
+
+        ttk.Label(status, text="Study left:").grid(row=0, column=0, sticky="w")
+        ttk.Label(status, textvariable=self.study_left_var).grid(row=0, column=1, sticky="w", padx=(6, 12))
+
+        ttk.Label(status, text="Breaks left:").grid(row=0, column=2, sticky="w")
+        ttk.Label(status, textvariable=self.break_left_var).grid(row=0, column=3, sticky="w", padx=(6, 12))
+
+        ttk.Label(status, text="Sessions:").grid(row=1, column=0, sticky="w")
+        ttk.Label(status, textvariable=self.sessions_elapsed_var).grid(row=1, column=1, sticky="w", padx=(6, 12))
+
+        # Progressbar for study progress
+        self.progress = ttk.Progressbar(frm, length=300, mode='determinate')
+        self.progress.grid(row=5, column=0, pady=(12, 0))
+
+        # A small help text
+        help_label = ttk.Label(frm, text="When the popup asks, click Yes if you studied that interval.\nIf you did not, answer whether it was a break.")
+        help_label.grid(row=6, column=0, pady=(8, 0))
+
+    # ---------------- Session control ----------------
+    def _on_test_mode_toggle(self):
+        # When toggling test mode, enable/disable the interval entry
+        if self.test_mode_var.get():
+            self.test_interval_entry.config(state='normal')
+        else:
+            self.test_interval_entry.config(state='disabled')
+
+    def _validate_inputs(self):
+        # Sanity checks on inputs
+        try:
+            study = int(self.study_total_var.get())
+            br = int(self.break_total_var.get())
+        except Exception:
+            messagebox.showerror("Invalid input", "Study and break hours must be integers.")
+            return False
+
+        if study <= 0:
+            messagebox.showerror("Invalid input", "Study hours must be greater than zero.")
+            return False
+        if br < 0:
+            messagebox.showerror("Invalid input", "Break hours cannot be negative.")
+            return False
+        if br >= study:
+            messagebox.showerror("Invalid input", "Break hours must be less than study hours.")
+            return False
+        return True
+
+    def start_session(self):
+        if self.running:
+            return
+        if not self._validate_inputs():
+            return
+
+        # Initialize remaining counters from totals
+        self.study_left_var.set(int(self.study_total_var.get()))
+        self.break_left_var.set(int(self.break_total_var.get()))
+        self.sessions_elapsed_var.set(0)
+
+        # Disable inputs while running
+        self.study_entry.config(state='disabled')
+        self.break_entry.config(state='disabled')
+        self.test_chk.config(state='disabled')
+        self.test_interval_entry.config(state='disabled')
+
+        self.running = True
+        self.start_btn.config(state='disabled')
+        self.pause_btn.config(state='normal')
+
+        # Schedule the first reminder
+        self._schedule_next()
+        self._update_gui()
+
+    def _get_interval_ms(self):
+        # Returns interval in milliseconds
+        if self.test_mode_var.get():
+            sec = max(1, int(self.test_interval_var.get()))
+            return sec * 1000
+        else:
+            return MILLISECONDS_PER_HOUR
+
+    def _schedule_next(self):
+        # Cancel previous timer if any
+        if self.timer_id is not None:
+            try:
+                self.root.after_cancel(self.timer_id)
+            except Exception:
+                pass
+            self.timer_id = None
+
+        # If no study left, finish
+        if self.study_left_var.get() <= 0:
+            self._finish_session()
+            return
+
+        interval = self._get_interval_ms()
+        # Schedule reminder_popup to be called after `interval` ms
+        self.timer_id = self.root.after(interval, self._reminder_popup)
+
+    def _reminder_popup(self):
+        # Called on the main thread via tkinter `after`
+        # Increment sessions count
+        self.sessions_elapsed_var.set(self.sessions_elapsed_var.get() + 1)
+
+        # Ask if the user studied in the interval
+        studied = messagebox.askyesno("Did you study?", "Did you study during the last interval?")
+
+        if studied:
+            # Reduce study left if possible
+            left = self.study_left_var.get()
+            if left > 0:
+                self.study_left_var.set(left - 1)
+            # If study completed, finish
+            if self.study_left_var.get() <= 0:
+                self._finish_session()
+                return
+        else:
+            # Ask if this interval was a break
+            was_break = messagebox.askyesno("Break?", "Was this interval a break?")
+            if was_break:
+                bl = self.break_left_var.get()
+                if bl > 0:
+                    self.break_left_var.set(bl - 1)
+                else:
+                    messagebox.showinfo("No breaks left", "You have no break hours left. Try to use future intervals for study.")
+            else:
+                # nothing changed for study_left
+                pass
+
+        # If not finished, schedule next reminder
+        self._update_gui()
+        if self.running:
+            self._schedule_next()
+
+    def stop_session(self):
+        # Pause the reminders
+        if not self.running:
+            return
+        self.running = False
+        if self.timer_id is not None:
+            try:
+                self.root.after_cancel(self.timer_id)
+            except Exception:
+                pass
+            self.timer_id = None
+        # Re-enable some controls for convenience
+        self.start_btn.config(state='normal')
+        self.pause_btn.config(state='disabled')
+        self.test_chk.config(state='normal')
+        # Keep current study/break entries disabled to avoid accidental change while paused
+        self._update_gui()
+
+    def reset_session(self):
+        # Cancel timer and reset everything to defaults
+        if self.timer_id is not None:
+            try:
+                self.root.after_cancel(self.timer_id)
+            except Exception:
+                pass
+            self.timer_id = None
+        self.running = False
+
+        # Reset running UI
+        self.study_entry.config(state='normal')
+        self.break_entry.config(state='normal')
+        self.test_chk.config(state='normal')
+        if self.test_mode_var.get():
+            self.test_interval_entry.config(state='normal')
+        else:
+            self.test_interval_entry.config(state='disabled')
+
+        # Reset counters
+        self.study_left_var.set(0)
+        self.break_left_var.set(0)
+        self.sessions_elapsed_var.set(0)
+
+        self.start_btn.config(state='normal')
+        self.pause_btn.config(state='disabled')
+        self._update_gui()
+
+    def _finish_session(self):
+        # Called when study_left reaches zero
+        messagebox.showinfo("All done!", "🎉 All study hours completed. Great job!")
+        # Stop the session and re-enable inputs
+        self.running = False
+        if self.timer_id is not None:
+            try:
+                self.root.after_cancel(self.timer_id)
+            except Exception:
+                pass
+            self.timer_id = None
+
+        self.study_entry.config(state='normal')
+        self.break_entry.config(state='normal')
+        self.test_chk.config(state='normal')
+        if self.test_mode_var.get():
+            self.test_interval_entry.config(state='normal')
+        self.start_btn.config(state='normal')
+        self.pause_btn.config(state='disabled')
+        self._update_gui()
+
+    def _update_gui(self):
+        # Update progress bar and any UI-bound state
+        total = max(1, int(self.study_total_var.get()))
+        left = int(self.study_left_var.get())
+        done = total - left
+        percent = int((done / total) * 100)
+        self.progress['value'] = percent
+
+
+def main():
+    root = tk.Tk()
+    app = StudyReminderApp(root)
+    root.protocol("WM_DELETE_WINDOW", root.quit)
+    root.mainloop()
+
+if __name__ == '__main__':
+    main()
